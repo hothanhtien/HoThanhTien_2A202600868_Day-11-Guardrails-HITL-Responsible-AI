@@ -1,14 +1,13 @@
 """
-Lab 11 — Configuration & API Key Setup
+Lab 11 — Configuration & API Key Setup (OpenAI)
 """
 import os
 
 
 def setup_api_key():
-    """Load Google API key from environment or prompt."""
-    if "GOOGLE_API_KEY" not in os.environ:
-        os.environ["GOOGLE_API_KEY"] = input("Enter Google API Key: ")
-    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "0"
+    """Load OpenAI API key from environment or prompt."""
+    if "OPENAI_API_KEY" not in os.environ:
+        os.environ["OPENAI_API_KEY"] = input("Enter OpenAI API Key: ")
     print("API key loaded.")
 
 

@@ -1,55 +1,89 @@
 """
-Lab 11 — Helper Utilities
+Lab 11 — Core utilities: lightweight agent + plugin base (OpenAI backend)
+
+Replaces Google ADK with a simple pure-Python pipeline that keeps the same
+chat_with_agent(agent, runner, message) call signature used everywhere.
 """
-from google.genai import types
+import asyncio
+import openai
 
 
-async def chat_with_agent(agent, runner, user_message: str, session_id=None):
-    """Send a message to the agent and get the response.
+# ── Plugin base ────────────────────────────────────────────────────────────────
 
-    Args:
-        agent: The LlmAgent instance
-        runner: The InMemoryRunner instance
-        user_message: Plain text message to send
-        session_id: Optional session ID to continue a conversation
+class BasePlugin:
+    """Minimal plugin interface (replaces google.adk.plugins.BasePlugin).
+
+    on_user_message  → called BEFORE the LLM; return a block string or None
+    on_model_response → called AFTER the LLM;  return (possibly modified) text
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+
+    async def on_user_message(self, text: str, user_id: str = "user") -> str | None:
+        """Return a block-message string to stop the request, or None to allow."""
+        return None
+
+    async def on_model_response(self, response: str, original_input: str = "") -> str:
+        """Return the (possibly redacted / replaced) response text."""
+        return response
+
+
+# ── Lightweight agent + runner ─────────────────────────────────────────────────
+
+class LlmAgent:
+    """Thin wrapper around an OpenAI chat model (replaces google.adk LlmAgent)."""
+
+    def __init__(self, model: str, name: str, instruction: str):
+        self.model = model
+        self.name = name
+        self.instruction = instruction
+
+
+class InMemoryRunner:
+    """Holds plugins alongside an agent (replaces google.adk InMemoryRunner)."""
+
+    def __init__(self, agent: LlmAgent, app_name: str, plugins: list = None):
+        self.agent = agent
+        self.app_name = app_name
+        self.plugins: list[BasePlugin] = plugins or []
+
+
+# ── Main helper ────────────────────────────────────────────────────────────────
+
+async def chat_with_agent(
+    agent: LlmAgent,
+    runner: InMemoryRunner,
+    user_message: str,
+    session_id=None,
+):
+    """Send a message through the plugin pipeline and then to the OpenAI model.
 
     Returns:
-        Tuple of (response_text, session)
+        (response_text, None)  — second element kept for API compatibility
     """
-    user_id = "student"
-    app_name = runner.app_name
+    plugins = runner.plugins if runner is not None else []
+    user_id = session_id or "user"
 
-    session = None
-    if session_id is not None:
-        try:
-            session = await runner.session_service.get_session(
-                app_name=app_name, user_id=user_id, session_id=session_id
-            )
-        except (ValueError, KeyError):
-            pass
+    # ── Input phase ──
+    for plugin in plugins:
+        block = await plugin.on_user_message(user_message, user_id)
+        if block is not None:
+            return block, None
 
-    if session is None:
-        try:
-            session = await runner.session_service.create_session(
-                app_name=app_name, user_id=user_id
-            )
-        except Exception:
-            session = await runner.session_service.create_session(
-                app_name=app_name, user_id=user_id
-            )
-
-    content = types.Content(
-        role="user",
-        parts=[types.Part.from_text(text=user_message)],
+    # ── LLM call ──
+    client = openai.OpenAI()
+    completion = client.chat.completions.create(
+        model=agent.model,
+        messages=[
+            {"role": "system", "content": agent.instruction},
+            {"role": "user",   "content": user_message},
+        ],
     )
+    response_text = completion.choices[0].message.content or ""
 
-    final_response = ""
-    async for event in runner.run_async(
-        user_id=user_id, session_id=session.id, new_message=content
-    ):
-        if hasattr(event, "content") and event.content and event.content.parts:
-            for part in event.content.parts:
-                if hasattr(part, "text") and part.text:
-                    final_response += part.text
+    # ── Output phase ──
+    for plugin in plugins:
+        response_text = await plugin.on_model_response(response_text, user_message)
 
-    return final_response, session
+    return response_text, None
